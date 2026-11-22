@@ -15,8 +15,8 @@ WIDTH, HEIGHT = 1600, 900
 BG = (17, 17, 17)  # #111111
 WHITE = (255, 255, 255)
 ORANGE = (255, 170, 23)  # #FFAA17
-MUTED = (186, 186, 186)
-CONTEXT_BODY = (210, 210, 210)
+MUTED = (225, 225, 225)
+CONTEXT_BODY = (245, 245, 245)
 DIVIDER = (78, 78, 78)
 HANDLE = "@NBSHARMA3"
 BRAND = "AROUND THE WORLD"
@@ -184,7 +184,7 @@ def render_card(
 
     # Header fonts
     brand_font = load_font(42, 800)
-    date_font = load_font(28, 530)
+    date_font = load_font(32, 650)
     brand_tracking = 6.0
 
     brand_y = HEADER_TOP
@@ -213,8 +213,8 @@ def render_card(
     draw.rectangle((PAD_X, header_bottom, WIDTH - PAD_X, header_bottom + 1), fill=DIVIDER)
 
     # Footer first, so we know the content window
-    handle_font = load_font(28, 650)
-    icon_size = 28
+    handle_font = load_font(34, 750)
+    icon_size = 34
     footer_line_y = HEIGHT - FOOTER_BOTTOM_PAD - icon_size - 22
     draw.rectangle((PAD_X, footer_line_y, WIDTH - PAD_X, footer_line_y + 2), fill=ORANGE)
 
@@ -239,7 +239,7 @@ def render_card(
     content_width = WIDTH - 2 * PAD_X
 
     # Place tag
-    place_font = load_font(34, 750)
+    place_font = load_font(42, 800)
     place_tracking = 8.0
     place_h = text_height(place_font, place or "A")
 
@@ -247,23 +247,23 @@ def render_card(
     headline_font, headline_lines, headline_size = fit_wrapped(
         headline,
         max_width=content_width,
-        max_lines=3,
-        max_size=80,
-        min_size=36,
-        weight=750,
+        max_lines=4,
+        max_size=100,
+        min_size=58,
+        weight=800,
     )
-    headline_lh = int(round(headline_size * 1.18))
+    headline_lh = int(round(headline_size * 1.14))
     headline_block_h = headline_lh * (len(headline_lines) - 1) + text_height(
         headline_font, headline_lines[0] if headline_lines else "Ag"
     )
 
     # Context
     label, body = split_context(context)
-    context_font = load_font(30, 450)
-    label_font = load_font(30, 650)
+    context_font = load_font(40, 600)
+    label_font = load_font(40, 800)
     context_lines: list[tuple[str, str]] = []  # (label_on_this_line_or_empty, text)
     context_block_h = 0
-    context_lh = 44
+    context_lh = 54
     if context:
         prefix = f"{label}: " if label else ""
         # Wrap the full context, then paint the label in a stronger weight on line 1
