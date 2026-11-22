@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Generate a vertical 1080x1920 news list/hero card for @NBSHARMA3 (code-drawn, no AI).
+"""Generate a vertical 2160x3840 (9:16) news list/hero card for @NBSHARMA3.
+
+Code-drawn with Pillow, no AI, saved as a lossless native PNG (no downscale).
 
 Usage:
   python3 make_vcard.py --json card.json --out card.png
@@ -11,7 +13,8 @@ JSON shape:
     "items": [{"place": "TOKYO", "text": "Headline in our own words."}]
   }
 
-Supports 1–10 items. A single item uses a large hero layout (good news).
+Supports 1–10 items. A single item uses a large hero layout
+(GOOD NEWS / BREAKING).
 """
 
 from __future__ import annotations
@@ -22,7 +25,6 @@ import os
 import sys
 from typing import Any, Iterable
 
-# Allow running from any cwd / copied location next to cardutil.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PIL import Image, ImageDraw, ImageFont
@@ -30,30 +32,37 @@ from PIL import Image, ImageDraw, ImageFont
 from cardutil import (
     BG,
     BRAND,
-    DIVIDER,
+    BREAKING_RED,
+    GOOD_GREEN,
     HANDLE,
-    HEIGHT,
+    INK,
     ORANGE,
-    SCALE,
+    PANEL,
+    PANEL_DEEP,
     WHITE,
-    WIDTH,
-    draw_brand_row,
-    draw_footer,
+    draw_circle_badge,
+    draw_pill,
     draw_text,
-    draw_top_bar,
     draw_tracked,
     ellipsize,
     fit_wrapped,
     load_font,
-    new_canvas,
-    save_png,
+    make_x_icon,
+    measure_pill,
+    save_png_native,
     text_height,
     text_width,
+    vertical_gradient,
     wrap_text,
 )
 
-PAD_X = 68
-MIN_HEAD = 34  # never shrink list headlines below this (1x pixels)
+# Native output — 9:16, no later downscale. 2160x3840 stays sharp after
+# social-network compression better than a 1080-wide source.
+WIDTH, HEIGHT = 2160, 3840
+PAD_X = 96
+TOP_BAR = 18
+# Floor for list headlines at this resolution (~50px at 1080-equivalent).
+MIN_HEAD = 88
 
 
 def load_payload(path: str) -> dict[str, Any]:
@@ -82,276 +91,403 @@ def load_payload(path: str) -> dict[str, Any]:
     return {"title": title, "datetime": datetime_str, "items": items}
 
 
-def _title_font(
-    title: str, max_width: float, s: int, max_size: int, min_size: int
-) -> tuple[ImageFont.FreeTypeFont, list[str], int]:
-    return fit_wrapped(title, max_width, 2, max_size * s, min_size * s, 800)
+
+def lines_for(text: str, font, max_width: float, max_lines: int) -> list[str]:
+    """Wrap to max_lines and always mark overflow with a clean ellipsis."""
+    wrapped = wrap_text(text, font, max_width)
+    if not wrapped:
+        return ["…"]
+    if len(wrapped) <= max_lines:
+        return [ellipsize(ln, font, max_width) for ln in wrapped]
+    kept = wrapped[:max_lines]
+    last = kept[-1].rstrip().rstrip(" ,;:.-–—")
+    while last and text_width(font, last + "…") > max_width:
+        last = last[:-1].rstrip().rstrip(" ,;:.-–—")
+    kept[-1] = (last + "…") if last else "…"
+    return kept
 
 
-def render_hero(
-    img: Image.Image,
+def category_style(title: str) -> tuple[str, tuple[int, int, int], tuple[int, int, int]]:
+    """Return (badge_label, badge_fill, badge_fg) from the card title."""
+    raw = " ".join(title.split())
+    upper = raw.upper()
+    if "GOOD NEWS" in upper or upper == "GOOD":
+        return "GOOD NEWS", GOOD_GREEN, WHITE
+    if "BREAKING" in upper:
+        # Keep the word BREAKING as the badge; leftover title is unused on hero.
+        return "BREAKING", BREAKING_RED, WHITE
+    return raw.upper(), ORANGE, INK
+
+
+def draw_brand_mark(draw: ImageDraw.ImageDraw, x: int, y: int, size: int = 40) -> int:
+    """Orange accent bar + AROUND THE WORLD. Returns bottom y."""
+    font = load_font(size, 800)
+    tracking = 6.0
+    bar_w, bar_h = 40, 8
+    brand_h = text_height(font, BRAND)
+    bar_y = y + max(0, (brand_h - bar_h) // 2) + 1
+    draw.rectangle((x, bar_y, x + bar_w, bar_y + bar_h), fill=ORANGE)
+    draw_tracked(draw, (x + bar_w + 18, y), BRAND, font, WHITE, tracking=tracking)
+    return y + brand_h
+
+
+def draw_footer_block(img: Image.Image, draw: ImageDraw.ImageDraw) -> int:
+    """Orange rule + X mark + handle. Returns the rule y (content floor)."""
+    pad = PAD_X
+    handle_font = load_font(44, 800)
+    icon_px = 44
+    bottom_pad = 88
+    footer_h = max(icon_px, text_height(handle_font, HANDLE))
+    content_y = HEIGHT - bottom_pad - footer_h
+    rule_y = content_y - 28
+    draw.rectangle((pad, rule_y, WIDTH - pad, rule_y + 5), fill=ORANGE)
+
+    icon = make_x_icon(icon_px, WHITE)
+    mid_y = content_y + footer_h / 2
+    img.paste(icon, (int(pad), int(round(mid_y - icon_px / 2))), icon)
+    handle_h = text_height(handle_font, HANDLE)
+    draw_text(
+        draw,
+        (pad + icon_px + 16, mid_y - handle_h / 2),
+        HANDLE,
+        handle_font,
+        WHITE,
+    )
+    return rule_y
+
+
+def draw_header_band(
     draw: ImageDraw.ImageDraw,
-    s: int,
     title: str,
     datetime_str: str,
-    item: dict[str, str],
-) -> None:
-    top = draw_top_bar(draw, s, bar_h=12)
-    y = top + 36 * s
-    y = draw_brand_row(draw, s, y, datetime_str, pad_x=PAD_X, brand_size=26, date_size=22)
-    y = y + 28 * s
+) -> int:
+    """Bold header band. Returns the y where content panels may start."""
+    # Band background sits under the orange top bar as well.
+    # Height is computed from the typography, then the rect is drawn first
+    # in a second pass... We measure, then draw.
+    pad = PAD_X
+    brand_size = 38
+    title_max, title_min = 118, 72
+    date_size = 34
 
-    pad = PAD_X * s
-    content_w = WIDTH * s - 2 * pad
+    brand_font = load_font(brand_size, 800)
+    brand_h = text_height(brand_font, BRAND)
 
-    title_font, title_lines, title_size = _title_font(title, content_w, s, 52, 36)
-    title_lh = int(round(title_size * 1.12))
-    # Title in orange for good-news / section feel
+    inner_w = WIDTH - 2 * pad
+    title_font, title_lines, title_size = fit_wrapped(
+        title.upper(), inner_w, 2, title_max, title_min, 900
+    )
+    title_lh = int(round(title_size * 1.10))
+    title_block = title_lh * (len(title_lines) - 1) + text_height(title_font, title_lines[0])
+
+    date_h = 0
+    date_font = None
+    date_text = datetime_str
+    if datetime_str:
+        date_font = load_font(date_size, 700)
+        date_text = ellipsize(datetime_str, date_font, inner_w - 80)
+        _dw, date_h = measure_pill(date_text, date_font, 28, 12)
+
+    top_pad, mid_gap, after_title, bot_pad = 44, 28, 24, 44
+    band_h = (
+        TOP_BAR
+        + top_pad
+        + brand_h
+        + mid_gap
+        + title_block
+        + (after_title + date_h if date_h else 0)
+        + bot_pad
+    )
+    draw.rectangle((0, 0, WIDTH, band_h), fill=PANEL)
+    draw.rectangle((0, 0, WIDTH, TOP_BAR), fill=ORANGE)
+
+    y = TOP_BAR + top_pad
+    draw_brand_mark(draw, pad, y, size=brand_size)
+    y = y + brand_h + mid_gap
     for i, line in enumerate(title_lines):
-        draw_text(draw, (pad, y + i * title_lh), line, title_font, ORANGE)
-    y = y + title_lh * (len(title_lines) - 1) + text_height(title_font, title_lines[0])
-    y = y + 22 * s
-    draw.rectangle((pad, y, WIDTH * s - pad, y + 2 * s), fill=DIVIDER)
-    header_bottom = y + 2 * s
-
-    rule_y = draw_footer(draw, img, s, pad_x=PAD_X, handle_size=32, icon_size=32, bottom_pad=56)
-    content_top = header_bottom + 48 * s
-    content_bottom = rule_y - 48 * s
-    window = content_bottom - content_top
-    inner_w = content_w
-
-    place = item["place"]
-    place_font, place_size = load_font(58 * s, 800), 58 * s
-    # Shrink the place tag if it is unusually long (e.g. WASHINGTON, DC).
-    while place_size > 36 * s and text_width(place_font, place, tracking=6.0 * s * (place_size / (58 * s))) > inner_w:
-        place_size -= 2 * s
-        place_font = load_font(place_size, 800)
-    place_tracking = max(4.0 * s, 6.0 * s * (place_size / (58 * s)))
-    if text_width(place_font, place, tracking=place_tracking) > inner_w:
-        # Fall back to untracked ellipsis rather than overflow.
-        place_tracking = 0
-        place = ellipsize(place, place_font, inner_w)
-    place_h = text_height(place_font, place or "H")
-
-    headline_font, headline_lines, headline_size = fit_wrapped(
-        item["text"],
-        max_width=inner_w,
-        max_lines=7,
-        max_size=96 * s,
-        min_size=52 * s,
-        weight=800,
-    )
-    headline_lh = int(round(headline_size * 1.16))
-    headline_block_h = headline_lh * (len(headline_lines) - 1) + text_height(
-        headline_font, headline_lines[0] if headline_lines else "Hg"
-    )
-
-    gap = 28 * s
-    block_h = place_h + gap + headline_block_h
-    start = content_top + max(0, int((window - block_h) * 0.42))
-
-    draw_tracked(draw, (pad, start), place, place_font, ORANGE, tracking=place_tracking)
-    hy = start + place_h + gap
-    for i, line in enumerate(headline_lines):
-        draw_text(draw, (pad, hy + i * headline_lh), line, headline_font, WHITE)
-
-
-def _list_line_budget(n: int) -> int:
-    if n <= 3:
-        return 3
-    if n <= 6:
-        return 3 if n <= 4 else 2
-    return 2
+        draw_text(draw, (pad, y + i * title_lh), line, title_font, WHITE)
+    y = y + title_block
+    if date_font is not None:
+        y += after_title
+        draw_pill(
+            draw,
+            (pad, y),
+            date_text,
+            date_font,
+            fill=BG,
+            fg=WHITE,
+            pad_x=28,
+            pad_y=12,
+            outline=ORANGE,
+            outline_w=4,
+        )
+        y += date_h
+    return band_h  # panels start after a gap applied by the caller
 
 
 def render_list(
     img: Image.Image,
     draw: ImageDraw.ImageDraw,
-    s: int,
     title: str,
     datetime_str: str,
     items: list[dict[str, str]],
 ) -> None:
     n = len(items)
-    top = draw_top_bar(draw, s, bar_h=12)
-    y = top + 32 * s
-    y = draw_brand_row(draw, s, y, datetime_str, pad_x=PAD_X, brand_size=24, date_size=22)
-    y = y + 22 * s
+    header_bottom = draw_header_band(draw, title, datetime_str)
+    rule_y = draw_footer_block(img, draw)
 
-    pad = PAD_X * s
-    content_w = WIDTH * s - 2 * pad
+    gap_top = 28
+    gap_bot = 28
+    row_gap = 16 if n >= 8 else 20
+    content_top = header_bottom + gap_top
+    content_bot = rule_y - gap_bot
+    available = content_bot - content_top
+    slot = available / n
+    panel_h = slot - row_gap
+    if panel_h < 200:
+        row_gap = 12
+        panel_h = slot - row_gap
 
-    # Bigger title when there are fewer rows to fill.
-    max_title = 50 if n >= 8 else 54
-    title_font, title_lines, title_size = _title_font(title, content_w, s, max_title, 34)
-    title_lh = int(round(title_size * 1.12))
-    for i, line in enumerate(title_lines):
-        draw_text(draw, (pad, y + i * title_lh), line, title_font, WHITE)
-    y = y + title_lh * (len(title_lines) - 1) + text_height(title_font, title_lines[0])
-    y = y + 20 * s
-    draw.rectangle((pad, y, WIDTH * s - pad, y + 2 * s), fill=DIVIDER)
-    header_bottom = y + 2 * s
+    pad = PAD_X
+    panel_w = WIDTH - 2 * pad
+    radius = 28
+    badge_r = 64 if n >= 8 else (72 if n >= 5 else 80)
+    badge_left = 28
+    text_x = badge_left + badge_r * 2 + 36
+    text_w = panel_w - text_x - 36
 
-    rule_y = draw_footer(draw, img, s, pad_x=PAD_X, handle_size=30, icon_size=30, bottom_pad=56)
-    content_top = header_bottom + 22 * s
-    content_bottom = rule_y - 22 * s
-    available = content_bottom - content_top
-    row_h = available / n
-
-    max_lines = _list_line_budget(n)
-    # Starting sizes scale up when fewer items share the card.
+    # Sizes scale gently when fewer rows share the canvas.
     if n <= 3:
-        num_max, head_max = 56, 48
+        place_size, head_max = 48, 128
     elif n <= 5:
-        num_max, head_max = 50, 44
+        place_size, head_max = 44, 120
     elif n <= 7:
-        num_max, head_max = 46, 40
+        place_size, head_max = 42, 112
     else:
-        num_max, head_max = 42, 38
+        place_size, head_max = 42, 108
 
-    min_head = MIN_HEAD
-    chosen = None
-    # Walk sizes down until every row fits, never going below min_head.
-    for num_size in range(num_max, 34, -2):
-        for head_size in range(head_max, min_head - 1, -2):
-            place_size = max(26, int(round(num_size * 0.80)))
-            num_font = load_font(num_size * s, 800)
-            place_font = load_font(place_size * s, 800)
-            head_font = load_font(head_size * s, 800)
-            num_col = int(text_width(num_font, "10") + 22 * s)
-            text_col = content_w - num_col
-            if text_col < 200 * s:
-                continue
-            num_h = text_height(num_font, "10")
-            place_h = text_height(place_font, "H")
-            tag_h = max(num_h, place_h)
-            head_lh = int(round(head_size * s * 1.18))
-            # Measure each item
-            prepared = []
-            max_used = 0
-            ok = True
-            for idx, it in enumerate(items, 1):
-                num = f"{idx:02d}"
-                place = it["place"]
-                place_tr = 3.0 * s
-                if text_width(place_font, place, tracking=place_tr) > text_col:
-                    place_tr = 0
-                    place = ellipsize(place, place_font, text_col)
-                lines = wrap_text(it["text"], head_font, text_col)
-                if len(lines) > max_lines:
-                    lines = lines[:max_lines]
-                    lines[-1] = ellipsize(lines[-1], head_font, text_col)
-                else:
-                    lines = [ellipsize(ln, head_font, text_col) for ln in lines]
-                if not lines:
-                    lines = ["…"]
-                head_block = head_lh * (len(lines) - 1) + text_height(head_font, lines[0])
-                used = tag_h + 8 * s + head_block
-                max_used = max(max_used, used)
-                prepared.append((num, place, place_tr, lines, head_block, tag_h))
-            # Vertical padding inside the row (divider lives in the leftover).
-            if max_used + 16 * s <= row_h:
-                chosen = {
-                    "num_font": num_font,
-                    "place_font": place_font,
-                    "head_font": head_font,
-                    "head_lh": head_lh,
-                    "num_col": num_col,
-                    "prepared": prepared,
-                    "num_size": num_size,
-                    "head_size": head_size,
-                }
-                ok = True
-                break
-            ok = False
-        if chosen:
-            break
+    place_font = load_font(place_size, 800)
+    place_h = text_height(place_font, "H")
+    place_gap = 14
+    inner_v = 24
+    # Room left for the headline block inside the panel.
+    head_room = panel_h - 2 * inner_v - place_h - place_gap
+    # Two-line line-height budget: pick the largest size that fits.
+    # lh = size * 1.16, two lines ≈ size * 1.16 + size * (cap ratio ~0.72)
+    # We measure properly in the loop below.
 
-    if not chosen:
-        # Last-resort fit at minimum headline size, truncating as needed.
-        num_size, head_size = 36, min_head
-        place_size = 22
-        num_font = load_font(num_size * s, 800)
-        place_font = load_font(place_size * s, 800)
-        head_font = load_font(head_size * s, 800)
-        num_col = int(text_width(num_font, "10") + 22 * s)
-        text_col = content_w - num_col
-        num_h = text_height(num_font, "10")
-        place_h = text_height(place_font, "H")
-        tag_h = max(num_h, place_h)
-        head_lh = int(round(head_size * s * 1.16))
-        prepared = []
+    prepared: list[tuple] = []
+    # Try a shared headline size so every row has the same typography.
+    chosen_head = MIN_HEAD
+    chosen_font = load_font(MIN_HEAD, 900)
+    chosen_lh = int(round(MIN_HEAD * 1.16))
+    for size in range(int(head_max), MIN_HEAD - 1, -2):
+        font = load_font(size, 900)
+        lh = int(round(size * 1.16))
+        ok = True
+        trial = []
         for idx, it in enumerate(items, 1):
-            num = f"{idx:02d}"
-            place = ellipsize(it["place"], place_font, text_col)
-            lines = wrap_text(it["text"], head_font, text_col) or ["…"]
-            # Drop lines until the row fits.
-            while lines:
-                head_block = head_lh * (len(lines) - 1) + text_height(head_font, lines[0])
-                if tag_h + 8 * s + head_block + 10 * s <= row_h:
-                    break
-                if len(lines) == 1:
-                    lines[0] = ellipsize(lines[0], head_font, text_col)
-                    break
-                lines = lines[:-1]
-                lines[-1] = ellipsize(lines[-1], head_font, text_col)
-            head_block = head_lh * (len(lines) - 1) + text_height(head_font, lines[0])
-            prepared.append((num, place, 0, lines, head_block, tag_h))
-        chosen = {
-            "num_font": num_font,
-            "place_font": place_font,
-            "head_font": head_font,
-            "head_lh": head_lh,
-            "num_col": num_col,
-            "prepared": prepared,
-        }
+            lines = lines_for(it["text"], font, text_w, 2)
+            block_h = lh * (len(lines) - 1) + text_height(font, lines[0])
+            if block_h > head_room:
+                ok = False
+                break
+            place = it["place"]
+            tr = 3.0
+            if text_width(place_font, place, tracking=tr) > text_w:
+                tr = 0
+                place = ellipsize(place, place_font, text_w)
+            trial.append((idx, place, tr, lines, block_h))
+        if ok:
+            chosen_head, chosen_font, chosen_lh, prepared = size, font, lh, trial
+            break
+    if not prepared:
+        font = load_font(MIN_HEAD, 900)
+        lh = int(round(MIN_HEAD * 1.14))
+        for idx, it in enumerate(items, 1):
+            lines = lines_for(it["text"], font, text_w, 2)
+            block_h = lh * (len(lines) - 1) + text_height(font, lines[0])
+            if block_h > head_room and len(lines) > 1:
+                lines = lines_for(it["text"], font, text_w, 1)
+                block_h = text_height(font, lines[0])
+            place = ellipsize(it["place"], place_font, text_w)
+            prepared.append((idx, place, 0, lines, block_h))
+        chosen_font, chosen_lh = font, lh
 
-    # Draw rows, vertically centred within each row slot.
-    for i, (num, place, place_tr, lines, head_block, tag_h) in enumerate(chosen["prepared"]):
-        slot_top = content_top + i * row_h
-        used = tag_h + 8 * s + head_block
-        inner_top = slot_top + max(0, (row_h - used) * 0.42)
-        # Number
-        draw_text(draw, (pad, inner_top), num, chosen["num_font"], ORANGE)
-        # Place on the same baseline band as the number
-        num_h = text_height(chosen["num_font"], num)
-        place_h = text_height(chosen["place_font"], place)
-        place_y = inner_top + max(0, (num_h - place_h) / 2)
-        draw_tracked(
-            draw,
-            (pad + chosen["num_col"], place_y),
-            place,
-            chosen["place_font"],
-            ORANGE,
-            tracking=place_tr,
+    badge_font = load_font(52 if badge_r < 70 else 58, 900)
+
+    for i, (idx, place, tr, lines, block_h) in enumerate(prepared):
+        slot_top = content_top + i * slot
+        py = int(round(slot_top))
+        ph = int(round(panel_h))
+        box = (pad, py, pad + panel_w, py + ph)
+        draw.rounded_rectangle(box, radius=radius, fill=PANEL)
+
+        # Vertically centre badge + (place + headline) as a group.
+        text_block_h = place_h + place_gap + block_h
+        group_h = max(badge_r * 2, text_block_h)
+        group_top = py + (ph - group_h) / 2
+        # Keep a hard inset so nothing kisses the panel edge.
+        inset = 26
+        if group_top < py + inset:
+            group_top = py + inset
+
+        cx = pad + badge_left + badge_r
+        cy = int(round(group_top + group_h / 2))
+        # Keep the circle fully inside the panel.
+        cy = min(max(cy, py + badge_r + 10), py + ph - badge_r - 10)
+        draw_circle_badge(
+            draw, int(cx), int(cy), int(badge_r), f"{idx:02d}", badge_font, fill=ORANGE, fg=INK
         )
-        hy = inner_top + tag_h + 8 * s
+
+        text_top = group_top + (group_h - text_block_h) / 2
+        tx = pad + text_x
+        draw_tracked(draw, (tx, text_top), place, place_font, ORANGE, tracking=tr)
+        hy = text_top + place_h + place_gap
         for li, line in enumerate(lines):
-            draw_text(
+            draw_text(draw, (tx, hy + li * chosen_lh), line, chosen_font, WHITE)
+
+
+def _hero_backdrop(accent: tuple[int, int, int]) -> Image.Image:
+    """Soft vertical gradient plus faint geometric accents."""
+    img = vertical_gradient((WIDTH, HEIGHT), BG, PANEL_DEEP)
+    ov = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov)
+    # Large soft disc, top-right.
+    r = int(WIDTH * 0.55)
+    cx, cy = int(WIDTH * 0.92), int(HEIGHT * 0.10)
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=accent + (22,))
+    # Thin outer ring.
+    r2 = r + 80
+    d.ellipse((cx - r2, cy - r2, cx + r2, cy + r2), outline=accent + (36,), width=18)
+    # Smaller disc, bottom-left.
+    r3 = int(WIDTH * 0.28)
+    cx3, cy3 = int(WIDTH * -0.02), int(HEIGHT * 0.88)
+    d.ellipse((cx3 - r3, cy3 - r3, cx3 + r3, cy3 + r3), fill=accent + (16,))
+    # Fine diagonal hairlines.
+    for i, y0 in enumerate((-400, 200, 800)):
+        d.line((0, y0 + HEIGHT // 6, WIDTH, y0 + HEIGHT // 6 + int(WIDTH * 0.55)), fill=(255, 255, 255, 12), width=3)
+    # Corner ticks, top-left and bottom-right of the content well.
+    tick, thick = 90, 6
+    # (drawn later in the content area — keep only background here)
+    return Image.alpha_composite(img.convert("RGBA"), ov).convert("RGB")
+
+
+def render_hero(
+    img: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    title: str,
+    datetime_str: str,
+    item: dict[str, str],
+) -> Image.Image:
+    label, fill, fg = category_style(title)
+    img = _hero_backdrop(fill if fill != ORANGE else ORANGE)
+    draw = ImageDraw.Draw(img)
+
+    # Orange top bar always — brand colour stays present even on breaking/good.
+    draw.rectangle((0, 0, WIDTH, TOP_BAR), fill=ORANGE)
+
+    pad = PAD_X
+    y = TOP_BAR + 56
+    y = draw_brand_mark(draw, pad, y, size=40)
+    y += 36
+
+    # Category badge (large).
+    badge_font = load_font(42, 900)
+    bw, bh = draw_pill(
+        draw,
+        (pad, y),
+        label,
+        badge_font,
+        fill=fill,
+        fg=fg,
+        pad_x=36,
+        pad_y=16,
+    )
+    # Optional date pill to the right of the category, if it fits.
+    if datetime_str:
+        date_font = load_font(32, 700)
+        date = ellipsize(datetime_str, date_font, WIDTH - pad - (pad + bw + 28) - pad)
+        dw, dh = measure_pill(date, date_font, 26, 12)
+        if pad + bw + 24 + dw <= WIDTH - pad:
+            dy = y + (bh - dh) / 2
+            draw_pill(
                 draw,
-                (pad + chosen["num_col"], hy + li * chosen["head_lh"]),
-                line,
-                chosen["head_font"],
-                WHITE,
+                (pad + bw + 24, int(dy)),
+                date,
+                date_font,
+                fill=BG,
+                fg=WHITE,
+                pad_x=26,
+                pad_y=12,
+                outline=ORANGE,
+                outline_w=4,
             )
-        # Hairline between rows (not after the last).
-        if i < n - 1:
-            line_y = slot_top + row_h - s  # 0.5px at 1x, use 1px at 1x = 2s? keep 1s
-            draw.rectangle((pad, int(slot_top + row_h) - 2, WIDTH * s - pad, int(slot_top + row_h)), fill=DIVIDER)
+    badge_bottom = y + bh
+
+    rule_y = draw_footer_block(img, draw)
+
+    # Content well between the badge and the footer, vertically centred.
+    well_top = badge_bottom + 80
+    well_bot = rule_y - 80
+    well_h = well_bot - well_top
+    inner_w = WIDTH - 2 * pad
+
+    place = item["place"]
+    place_size = 72
+    place_font = load_font(place_size, 800)
+    place_tr = 6.0
+    while place_size > 48 and text_width(place_font, place, tracking=place_tr) > inner_w:
+        place_size -= 2
+        place_font = load_font(place_size, 800)
+    if text_width(place_font, place, tracking=place_tr) > inner_w:
+        place_tr = 0
+        place = ellipsize(place, place_font, inner_w)
+    place_h = text_height(place_font, "H")
+
+    headline_font, lines, size = fit_wrapped(
+        item["text"],
+        max_width=inner_w,
+        max_lines=6,
+        max_size=168,
+        min_size=92,
+        weight=900,
+    )
+    lh = int(round(size * 1.14))
+    head_h = lh * (len(lines) - 1) + text_height(headline_font, lines[0])
+    gap = 36
+    block_h = place_h + gap + head_h
+    start = well_top + max(0, int((well_h - block_h) * 0.42))
+
+    # Short orange rule above the place tag, for a broadcast-style lockup.
+    rule_w = 72
+    rule_h = 8
+    draw.rectangle((pad, int(start) - 28, pad + rule_w, int(start) - 28 + rule_h), fill=ORANGE)
+
+    draw_tracked(draw, (pad, start), place, place_font, ORANGE, tracking=place_tr)
+    hy = start + place_h + gap
+    for i, line in enumerate(lines):
+        draw_text(draw, (pad, hy + i * lh), line, headline_font, WHITE)
+
+    return img
 
 
 def render_vcard(payload: dict[str, Any], out_path: str) -> str:
     items = payload["items"]
-    img, draw, s = new_canvas()
     if len(items) == 1:
-        render_hero(img, draw, s, payload["title"], payload["datetime"], items[0])
+        # Backdrop is built inside render_hero (returns the image).
+        img = Image.new("RGB", (WIDTH, HEIGHT), BG)
+        draw = ImageDraw.Draw(img)
+        img = render_hero(img, draw, payload["title"], payload["datetime"], items[0])
     else:
-        render_list(img, draw, s, payload["title"], payload["datetime"], items)
-    return save_png(img, out_path)
+        img = Image.new("RGB", (WIDTH, HEIGHT), BG)
+        draw = ImageDraw.Draw(img)
+        render_list(img, draw, payload["title"], payload["datetime"], items)
+    return save_png_native(img, out_path)
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Render a 1080x1920 vertical news card for @NBSHARMA3")
+    p = argparse.ArgumentParser(description="Render a 2160x3840 vertical news card for @NBSHARMA3")
     p.add_argument("--json", required=True, help="Path to JSON with title, datetime, items")
     p.add_argument("--out", required=True, help="Output PNG path")
     return p.parse_args(argv)

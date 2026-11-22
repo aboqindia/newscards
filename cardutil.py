@@ -17,6 +17,11 @@ ORANGE = (255, 170, 23)  # #FFAA17
 MUTED = (236, 236, 236)  # near-white, stays clearly readable
 DIVIDER = (70, 70, 70)
 DOT_OFF = (72, 72, 72)
+PANEL = (28, 30, 34)  # #1C1E22
+PANEL_DEEP = (20, 21, 24)
+BREAKING_RED = (226, 58, 46)  # #E23A2E
+GOOD_GREEN = (42, 165, 106)  # #2AA56A
+INK = (17, 17, 17)  # same as BG, for text on orange/green badges
 HANDLE = "@NBSHARMA3"
 BRAND = "AROUND THE WORLD"
 
@@ -52,8 +57,12 @@ def text_height(font: ImageFont.FreeTypeFont, text: str = "Hg") -> int:
 
 
 def cap_baseline(font: ImageFont.FreeTypeFont, y_top: float) -> float:
-    """Baseline so a capital letter's top sits at y_top."""
-    top = font.getbbox("H")[1]
+    """Baseline so a capital letter's top sits at y_top.
+
+    Always use anchor='ls': Pillow's default getbbox is not baseline-relative
+    and would place tracked text (and commas) about one ascent too high.
+    """
+    top = font.getbbox("H", anchor="ls")[1]
     return y_top - top
 
 
@@ -271,3 +280,73 @@ def draw_footer(
         WHITE,
     )
     return rule_y
+
+
+def save_png_native(img: Image.Image, out_path: str) -> str:
+    """Save an RGB PNG at its native size. Lossless, no downscale."""
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    img.save(out_path, "PNG", optimize=True, compress_level=6)
+    return out_path
+
+
+def vertical_gradient(size: tuple[int, int], top: tuple[int, int, int], bottom: tuple[int, int, int]) -> Image.Image:
+    import numpy as np
+    w, h = size
+    t = np.linspace(0, 1, h, dtype=np.float32)[:, None]
+    top_a = np.array(top, dtype=np.float32)
+    bot_a = np.array(bottom, dtype=np.float32)
+    cols = (top_a[None, :] + (bot_a - top_a)[None, :] * t).astype(np.uint8)
+    data = np.repeat(cols[:, None, :], w, axis=1)
+    return Image.fromarray(data, "RGB")
+
+
+def draw_circle_badge(
+    draw: ImageDraw.ImageDraw,
+    cx: int,
+    cy: int,
+    r: int,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int] = ORANGE,
+    fg: tuple[int, int, int] = INK,
+) -> None:
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fill)
+    draw.text((cx, cy), text, font=font, fill=fg, anchor="mm")
+
+
+def measure_pill(
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    pad_x: int,
+    pad_y: int,
+) -> tuple[int, int]:
+    tw = text_width(font, text)
+    th = text_height(font, text)
+    return int(tw + 2 * pad_x), int(th + 2 * pad_y)
+
+
+def draw_pill(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int],
+    fg: tuple[int, int, int],
+    pad_x: int,
+    pad_y: int,
+    outline: tuple[int, int, int] | None = None,
+    outline_w: int = 3,
+) -> tuple[int, int]:
+    x, y = xy
+    w, h = measure_pill(text, font, pad_x, pad_y)
+    radius = h // 2
+    box = (int(x), int(y), int(x + w), int(y + h))
+    if outline:
+        draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=int(outline_w))
+    else:
+        draw.rounded_rectangle(box, radius=radius, fill=fill)
+    th = text_height(font, text)
+    draw_text(draw, (x + pad_x, y + (h - th) / 2), text, font, fg)
+    return w, h

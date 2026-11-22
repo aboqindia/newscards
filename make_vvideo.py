@@ -37,11 +37,13 @@ from cardutil import (
     DIVIDER,
     DOT_OFF,
     HANDLE,
+    INK,
     HEIGHT,
     ORANGE,
     WHITE,
     WIDTH,
     draw_brand_row,
+    draw_circle_badge,
     draw_text,
     draw_top_bar,
     draw_tracked,
@@ -194,28 +196,20 @@ def render_item(
     content_bottom = dots_cy - 48 * s
     inner_w = WIDTH * s - 2 * pad
 
-    # Number badge
+    # Number badge — filled orange circle, dark number (matches the vcard).
     num = f"{index:02d}"
-    badge_font = load_font(44 * s, 800)
-    badge_h_pad, badge_v_pad = 22 * s, 12 * s
-    nw = text_width(badge_font, num)
-    nh = text_height(badge_font, num)
-    bw, bh = int(nw + 2 * badge_h_pad), int(nh + 2 * badge_v_pad)
+    badge_r = 44 * s
+    badge_font = load_font(42 * s, 900)
+    cx = pad + badge_r
+    cy = content_top + badge_r
+    draw_circle_badge(draw, int(cx), int(cy), int(badge_r), num, badge_font, fill=ORANGE, fg=INK)
+    bw = bh = badge_r * 2
     bx, by = pad, content_top
-    draw.rounded_rectangle((int(bx), int(by), int(bx + bw), int(by + bh)), radius=int(12 * s), fill=ORANGE)
-    # Dark number on orange for maximum contrast.
-    draw_text(
-        draw,
-        (bx + (bw - nw) / 2, by + (bh - nh) / 2),
-        num,
-        badge_font,
-        BG,
-    )
 
     # Place tag to the right of the badge, vertically centred.
-    place_font = load_font(42 * s, 800)
+    place_font = load_font(44 * s, 800)
     place_tr = 4.0 * s
-    place_max = inner_w - bw - 24 * s
+    place_max = inner_w - bw - 28 * s
     if text_width(place_font, place, tracking=place_tr) > place_max:
         place_tr = 0
         place = ellipsize(place, place_font, place_max)
@@ -223,7 +217,7 @@ def render_item(
     # lift the place tag into the header rule.
     ph = text_height(place_font, "H")
     place_y = by + (bh - ph) / 2
-    draw_tracked(draw, (bx + bw + 24 * s, place_y), place, place_font, ORANGE, tracking=place_tr)
+    draw_tracked(draw, (bx + bw + 28 * s, place_y), place, place_font, ORANGE, tracking=place_tr)
 
     # Headline fills the remaining mid-frame, large and bold.
     head_top = by + bh + 36 * s
@@ -231,12 +225,12 @@ def render_item(
     # Pick a size whose wrapped block fits the leftover height.
     headline_font = lines = size = None
     for max_size, max_lines, min_size in (
-        (86, 5, 52),
-        (72, 6, 44),
-        (60, 7, 40),
-        (52, 8, 36),
+        (92, 5, 56),
+        (76, 6, 48),
+        (64, 7, 42),
+        (54, 8, 36),
     ):
-        font, wrapped, sz = fit_wrapped(text, inner_w, max_lines, max_size * s, min_size * s, 800)
+        font, wrapped, sz = fit_wrapped(text, inner_w, max_lines, max_size * s, min_size * s, 900)
         lh = int(round(sz * 1.16))
         block_h = lh * (len(wrapped) - 1) + text_height(font, wrapped[0] if wrapped else "Hg")
         if block_h <= head_max_h:
