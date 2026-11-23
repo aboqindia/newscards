@@ -12,9 +12,15 @@ JSON shape matches make_vcard.py:
     "items": [{"place": "TOKYO", "text": "Headline in our own words."}]
   }
 
-Supports 1–10 items. Default total duration is ~14s for 5 items, and
-~14–15s for 10 items (about 1.3s each). Silent AAC audio is included
-for X compatibility. Output is H.264 yuv420p, 30fps, faststart, under 15MB.
+Supports 1–10 items. Items are shown two per screen so the frame stays
+full and every headline is drawn in full (wrapped, never ellipsized).
+A leftover final item uses a larger hero layout.
+
+  5 items  -> screens of 2 + 2 + 1, default ~14s
+  10 items -> five screens of 2, default ~15s
+
+Silent AAC audio is included for X compatibility. Output is H.264
+yuv420p, 30fps, faststart, under 15MB.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ from cardutil import (
     INK,
     HEIGHT,
     ORANGE,
+    PANEL,
     WHITE,
     WIDTH,
     draw_brand_row,
@@ -55,28 +62,51 @@ from cardutil import (
     save_png,
     text_height,
     text_width,
+    wrap_text,
 )
 from make_vcard import load_payload
 
 PAD_X = 72
-TRANS = 0.25  # quick slide/fade, seconds
+TRANS = 0.22  # quick slide / fade, seconds
 FPS = 30
 MAX_BYTES = 15 * 1024 * 1024
 
 
-def timings(n: int, target: float | None) -> tuple[float, float, float, float]:
-    """Return (intro_vis, item_vis, outro_vis, trans). Output ≈ sum of vis times."""
-    if n <= 5:
-        intro, outro, default = 1.5, 1.0, 14.0
+def chunk_items(items: list[dict[str, str]]) -> list[list[tuple[int, dict[str, str]]]]:
+    """Group items into screens of 2, with a possible leftover hero of 1."""
+    numbered = [(i, it) for i, it in enumerate(items, 1)]
+    chunks: list[list[tuple[int, dict[str, str]]]] = []
+    i = 0
+    n = len(numbered)
+    while i < n:
+        if i + 1 == n:
+            chunks.append(numbered[i : i + 1])
+            i += 1
+        else:
+            chunks.append(numbered[i : i + 2])
+            i += 2
+    return chunks
+
+
+def timings(
+    n_screens: int, n_items: int, target: float | None
+) -> tuple[float, float, float, float]:
+    """Return (intro_vis, screen_vis, outro_vis, trans).
+
+    Visible times are split so they sum to the target duration.
+    """
+    if n_items <= 5:
+        intro, outro, default = 1.15, 0.85, 14.0
     else:
-        intro, outro, default = 0.9, 0.8, 14.5
+        intro, outro, default = 0.80, 0.70, 15.0
     goal = float(target) if target else default
-    item = (goal - intro - outro) / max(n, 1)
-    if n <= 5:
-        item = min(2.7, max(2.0, item))
-    else:
-        item = min(1.5, max(1.2, item))
-    return intro, item, outro, TRANS
+    min_screen = 1.8 if n_items <= 5 else 1.6
+    if goal - intro - outro < n_screens * min_screen:
+        intro = max(0.6, intro * 0.7)
+        outro = max(0.5, outro * 0.7)
+    screen = (goal - intro - outro) / max(n_screens, 1)
+    screen = max(screen, 1.4)
+    return intro, screen, outro, TRANS
 
 
 def split_title(title: str) -> tuple[str, str]:
@@ -89,6 +119,40 @@ def split_title(title: str) -> tuple[str, str]:
     if parts and parts[0].upper() == "BREAKING":
         return parts[0].upper(), parts[1].strip() if len(parts) > 1 else ""
     return "", title
+
+
+def fit_full(
+    text: str,
+    max_width: float,
+    max_height: float,
+    max_size: int,
+    min_size: int,
+    weight: int = 900,
+    lh_ratio: float = 1.14,
+) -> tuple[object, list[str], int, int]:
+    """Wrap the full headline and shrink the font until the block fits.
+
+    Never ellipsizes or drops lines. If even min_size overflows, the font
+    keeps shrinking down to a hard readable floor.
+    """
+    text = " ".join(text.split())
+    hard_min = max(28, min(min_size, 36))
+    last = None
+    for size in range(int(max_size), hard_min - 1, -2):
+        font = load_font(size, weight)
+        lines = wrap_text(text, font, max_width) or [""]
+        lh = int(round(size * lh_ratio))
+        first = lines[0] if lines[0] else "Hg"
+        h = lh * max(0, len(lines) - 1) + text_height(font, first)
+        last = (font, lines, size, lh, h)
+        if h <= max_height:
+            return font, lines, size, lh
+    # Still too tall at the floor — tighten line height once, still no crop.
+    font, lines, size, lh, h = last
+    tight = 1.08
+    lh = int(round(size * tight))
+    first = lines[0] if lines[0] else "Hg"
+    return font, lines, size, lh
 
 
 def draw_progress_dots(
@@ -109,9 +173,175 @@ def draw_progress_dots(
         if i == current:
             draw.ellipse(tuple(map(int, box)), fill=ORANGE)
         else:
-            # Filled dim disc — reads more clearly than a thin ring at 1080.
             draw.ellipse(tuple(map(int, box)), fill=DOT_OFF)
         x += 2 * r + gap
+
+
+def draw_kicker(draw: ImageDraw.ImageDraw, s: int, y: int, title: str, pad: int) -> int:
+    """One-line 'BREAKING  ·  TOP 5' under the brand row. Returns bottom y."""
+    lead, rest = split_title(title)
+    font = load_font(26 * s, 800)
+    h = text_height(font, "H")
+    x = pad
+    if lead:
+        draw_text(draw, (x, y), lead.upper(), font, ORANGE)
+        x += text_width(font, lead.upper())
+        if rest:
+            dot = "  ·  "
+            draw_text(draw, (x, y), dot, font, DIVIDER)
+            x += text_width(font, dot)
+    if rest:
+        draw_text(draw, (x, y), rest.upper(), font, WHITE)
+    elif not lead:
+        draw_text(draw, (x, y), title.upper(), font, WHITE)
+    return y + h
+
+
+def draw_screen_footer(
+    img: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    s: int,
+    n_screens: int,
+    current: int,
+) -> int:
+    """Progress dots + centred handle. Returns the y content must stay above."""
+    dots_cy = HEIGHT * s - 158 * s
+    handle_y = HEIGHT * s - 104 * s
+    draw_progress_dots(draw, s, n_screens, current, dots_cy)
+
+    hfont = load_font(28 * s, 800)
+    hw = text_width(hfont, HANDLE)
+    icon_px = 28 * s
+    icon = make_x_icon(icon_px, WHITE)
+    group_w = icon_px + 12 * s + hw
+    gx = (WIDTH * s - group_w) // 2
+    mid = handle_y + max(icon_px, text_height(hfont, HANDLE)) / 2
+    img.paste(icon, (int(gx), int(round(mid - icon_px / 2))), icon)
+    draw_text(
+        draw,
+        (gx + icon_px + 12 * s, mid - text_height(hfont, HANDLE) / 2),
+        HANDLE,
+        hfont,
+        WHITE,
+    )
+    return dots_cy - 36 * s
+
+
+def draw_screen_header(
+    draw: ImageDraw.ImageDraw,
+    s: int,
+    title: str,
+    datetime_str: str,
+) -> int:
+    """Top bar, brand, datetime, kicker. Returns content top y."""
+    draw_top_bar(draw, s, bar_h=12)
+    pad = PAD_X * s
+    y = 12 * s + 26 * s
+    y = draw_brand_row(draw, s, y, datetime_str, pad_x=PAD_X, brand_size=22, date_size=20)
+    y = y + 16 * s
+    y = draw_kicker(draw, s, y, title, pad)
+    y = y + 16 * s
+    draw.rectangle((pad, y, WIDTH * s - pad, y + 2 * s), fill=DIVIDER)
+    return y + 2 * s + 24 * s
+
+
+def _fit_place(place: str, font, max_width: float, tracking: float) -> tuple[str, float]:
+    if text_width(font, place, tracking=tracking) > max_width:
+        tracking = 0
+        place = ellipsize(place, font, max_width)
+    return place, tracking
+
+
+def draw_item_block(
+    draw: ImageDraw.ImageDraw,
+    s: int,
+    box: tuple[int, int, int, int],
+    index: int,
+    place: str,
+    text: str,
+    *,
+    hero: bool = False,
+) -> None:
+    """Draw one news item inside a rounded panel, headline in full."""
+    x0, y0, x1, y1 = box
+    panel_w = x1 - x0
+    panel_h = y1 - y0
+    radius = 22 * s
+    draw.rounded_rectangle(box, radius=radius, fill=PANEL)
+    # Orange leading edge, inset so it sits inside the rounded corner.
+    edge_w = 8 * s
+    draw.rectangle((x0, y0 + radius // 2, x0 + edge_w, y1 - radius // 2), fill=ORANGE)
+
+    inset = 28 * s
+    inner_x = x0 + inset
+    inner_w = panel_w - 2 * inset
+    inner_top = y0 + inset
+    inner_bot = y1 - inset
+    inner_h = inner_bot - inner_top
+
+    if hero:
+        badge_r = 48 * s
+        badge_font = load_font(44 * s, 900)
+        place_size = 36 * s
+        head_max, head_min = 88 * s, 48 * s
+        badge_gap = 28 * s
+        place_gap = 28 * s
+    else:
+        badge_r = 38 * s
+        badge_font = load_font(34 * s, 900)
+        place_size = 30 * s
+        head_max, head_min = 62 * s, 40 * s
+        badge_gap = 22 * s
+        place_gap = 18 * s
+
+    place_font = load_font(place_size, 800)
+    place_tr = 3.0 * s
+    place_max = inner_w - (badge_r * 2 + badge_gap)
+    place, place_tr = _fit_place(place, place_font, place_max, place_tr)
+    place_h = text_height(place_font, "H")
+
+    badge_d = badge_r * 2
+    row_h = max(badge_d, place_h)
+    # Headline gets everything below the badge/place row.
+    head_top_off = row_h + place_gap
+    head_max_h = inner_h - head_top_off
+    # Leave at least a slim band for type; fit_full will shrink if needed.
+    if head_max_h < 80 * s:
+        head_max_h = max(60 * s, inner_h - row_h - 12 * s)
+
+    font, lines, size, lh = fit_full(
+        text, inner_w, head_max_h, head_max, head_min, 900, 1.14
+    )
+    first = lines[0] if lines and lines[0] else "Hg"
+    head_h = lh * max(0, len(lines) - 1) + text_height(font, first)
+    block_h = head_top_off + head_h
+
+    # Vertically centre the badge + place + headline group in the panel.
+    group_top = inner_top + max(0, int((inner_h - block_h) * 0.45))
+    if group_top + block_h > inner_bot:
+        group_top = max(inner_top, inner_bot - block_h)
+
+    cx = inner_x + badge_r
+    cy = int(round(group_top + row_h / 2))
+    # Keep the circle fully inside the panel.
+    cy = min(max(cy, y0 + badge_r + 10 * s), y1 - badge_r - 10 * s)
+    draw_circle_badge(
+        draw, int(cx), int(cy), int(badge_r), f"{index:02d}", badge_font, fill=ORANGE, fg=INK
+    )
+
+    place_y = group_top + (row_h - place_h) / 2
+    draw_tracked(
+        draw,
+        (inner_x + badge_d + badge_gap, place_y),
+        place,
+        place_font,
+        ORANGE,
+        tracking=place_tr,
+    )
+
+    hy = group_top + head_top_off
+    for i, line in enumerate(lines):
+        draw_text(draw, (inner_x, hy + i * lh), line, font, WHITE)
 
 
 def render_intro(path: str, title: str, datetime_str: str) -> str:
@@ -119,18 +349,16 @@ def render_intro(path: str, title: str, datetime_str: str) -> str:
     draw_top_bar(draw, s, bar_h=14)
     pad = PAD_X * s
 
-    # Brand near the top, no datetime (datetime sits under the title).
     y = 14 * s + 56 * s
     y = draw_brand_row(draw, s, y, "", pad_x=PAD_X, brand_size=26, date_size=22)
 
     lead, rest = split_title(title)
     inner_w = WIDTH * s - 2 * pad
 
-    # Vertically centre the main title block in the remaining mid area.
     mid_top = y + 80 * s
     mid_bot = HEIGHT * s - 280 * s
 
-    blocks: list[tuple[str, object, int, tuple[int, int, int]]] = []
+    blocks: list[tuple] = []
     if lead:
         font, lines, size = fit_wrapped(lead.upper(), inner_w, 2, 110 * s, 64 * s, 800)
         lh = int(round(size * 1.12))
@@ -151,12 +379,10 @@ def render_intro(path: str, title: str, datetime_str: str) -> str:
             draw_text(draw, (pad, yy + i * lh), line, font, color)
         yy += h + gap
 
-    # Datetime and handle near the bottom.
     if datetime_str:
         dfont = load_font(28 * s, 650)
         dtext = ellipsize(datetime_str, dfont, inner_w)
         dw = text_width(dfont, dtext)
-        dh = text_height(dfont, dtext)
         draw_text(draw, ((WIDTH * s - dw) // 2, HEIGHT * s - 200 * s), dtext, dfont, WHITE)
 
     hfont = load_font(30 * s, 800)
@@ -172,102 +398,53 @@ def render_intro(path: str, title: str, datetime_str: str) -> str:
     return save_png(img, path)
 
 
-def render_item(
+def render_pair(
+    path: str,
+    title: str,
+    datetime_str: str,
+    pair: list[tuple[int, dict[str, str]]],
+    screen_i: int,
+    n_screens: int,
+) -> str:
+    img, draw, s = new_canvas()
+    content_top = draw_screen_header(draw, s, title, datetime_str)
+    content_bot = draw_screen_footer(img, draw, s, n_screens, screen_i)
+    pad = PAD_X * s
+    gap = 20 * s
+    available = content_bot - content_top
+    panel_h = int((available - gap) // 2)
+    x0, x1 = pad, WIDTH * s - pad
+
+    y = content_top
+    for index, item in pair:
+        box = (int(x0), int(y), int(x1), int(y + panel_h))
+        draw_item_block(draw, s, box, index, item["place"], item["text"], hero=False)
+        y += panel_h + gap
+    return save_png(img, path)
+
+
+def render_hero_item(
     path: str,
     title: str,
     datetime_str: str,
     index: int,
-    n: int,
-    place: str,
-    text: str,
+    item: dict[str, str],
+    screen_i: int,
+    n_screens: int,
 ) -> str:
     img, draw, s = new_canvas()
-    draw_top_bar(draw, s, bar_h=12)
-    y = 12 * s + 32 * s
-    y = draw_brand_row(draw, s, y, datetime_str, pad_x=PAD_X, brand_size=24, date_size=20)
-    y = y + 18 * s
+    content_top = draw_screen_header(draw, s, title, datetime_str)
+    content_bot = draw_screen_footer(img, draw, s, n_screens, screen_i)
     pad = PAD_X * s
-    draw.rectangle((pad, y, WIDTH * s - pad, y + 2 * s), fill=DIVIDER)
-    content_top = y + 2 * s + 48 * s
-
-    # Dots + handle reserve the bottom.
-    dots_cy = HEIGHT * s - 168 * s
-    handle_y = HEIGHT * s - 110 * s
-    content_bottom = dots_cy - 48 * s
-    inner_w = WIDTH * s - 2 * pad
-
-    # Number badge — filled orange circle, dark number (matches the vcard).
-    num = f"{index:02d}"
-    badge_r = 44 * s
-    badge_font = load_font(42 * s, 900)
-    cx = pad + badge_r
-    cy = content_top + badge_r
-    draw_circle_badge(draw, int(cx), int(cy), int(badge_r), num, badge_font, fill=ORANGE, fg=INK)
-    bw = bh = badge_r * 2
-    bx, by = pad, content_top
-
-    # Place tag to the right of the badge, vertically centred.
-    place_font = load_font(44 * s, 800)
-    place_tr = 4.0 * s
-    place_max = inner_w - bw - 28 * s
-    if text_width(place_font, place, tracking=place_tr) > place_max:
-        place_tr = 0
-        place = ellipsize(place, place_font, place_max)
-    # Use cap-height, not the full string, so a comma descender cannot
-    # lift the place tag into the header rule.
-    ph = text_height(place_font, "H")
-    place_y = by + (bh - ph) / 2
-    draw_tracked(draw, (bx + bw + 28 * s, place_y), place, place_font, ORANGE, tracking=place_tr)
-
-    # Headline fills the remaining mid-frame, large and bold.
-    head_top = by + bh + 36 * s
-    head_max_h = content_bottom - head_top
-    # Pick a size whose wrapped block fits the leftover height.
-    headline_font = lines = size = None
-    for max_size, max_lines, min_size in (
-        (92, 5, 56),
-        (76, 6, 48),
-        (64, 7, 42),
-        (54, 8, 36),
-    ):
-        font, wrapped, sz = fit_wrapped(text, inner_w, max_lines, max_size * s, min_size * s, 900)
-        lh = int(round(sz * 1.16))
-        block_h = lh * (len(wrapped) - 1) + text_height(font, wrapped[0] if wrapped else "Hg")
-        if block_h <= head_max_h:
-            headline_font, lines, size = font, wrapped, sz
-            break
-    if headline_font is None:
-        headline_font, lines, size = fit_wrapped(text, inner_w, 8, 40 * s, 34 * s, 800)
-    lh = int(round(size * 1.16))
-    for i, line in enumerate(lines):
-        draw_text(draw, (pad, head_top + i * lh), line, headline_font, WHITE)
-
-    draw_progress_dots(draw, s, n, index - 1, dots_cy)
-
-    hfont = load_font(28 * s, 800)
-    hw = text_width(hfont, HANDLE)
-    icon_px = 28 * s
-    icon = make_x_icon(icon_px, WHITE)
-    group_w = icon_px + 12 * s + hw
-    gx = (WIDTH * s - group_w) // 2
-    mid = handle_y + max(icon_px, text_height(hfont, HANDLE)) / 2
-    img.paste(icon, (int(gx), int(round(mid - icon_px / 2))), icon)
-    draw_text(
-        draw,
-        (gx + icon_px + 12 * s, mid - text_height(hfont, HANDLE) / 2),
-        HANDLE,
-        hfont,
-        WHITE,
-    )
+    box = (int(pad), int(content_top), int(WIDTH * s - pad), int(content_bot))
+    draw_item_block(draw, s, box, index, item["place"], item["text"], hero=True)
     return save_png(img, path)
 
 
 def render_outro(path: str) -> str:
     img, draw, s = new_canvas()
     draw_top_bar(draw, s, bar_h=14)
-    pad = PAD_X * s
 
-    # Centre the sign-off block.
     icon_px = 72 * s
     icon = make_x_icon(icon_px, WHITE)
     handle_font = load_font(56 * s, 800)
@@ -291,7 +468,6 @@ def render_outro(path: str) -> str:
     y += hh + gap2
     draw_text(draw, ((WIDTH * s - fw) // 2, y), follow, follow_font, ORANGE)
     y += fh + gap3
-    # Small orange accent + brand
     bar_w, bar_h = 28 * s, 6 * s
     brand_x = (WIDTH * s - (bar_w + 14 * s + br_w)) // 2
     bar_y = y + max(0, (br_h - bar_h) // 2) + 1 * s
@@ -301,12 +477,11 @@ def render_outro(path: str) -> str:
 
 
 def encode_video(frames: list[tuple[str, float]], trans: float, out_path: str) -> None:
-    """Stitch still frames with xfade (fade on/off, slideleft between items)."""
+    """Stitch still frames with xfade (fade on/off, slideleft between screens)."""
     n = len(frames)
     if n < 2:
         raise ValueError("Need at least intro + outro")
     vis = [d for _, d in frames]
-    # Clip duration must cover the outgoing (and incoming) transition.
     clip_durs = [vis[i] + (trans if i < n - 1 else 0.0) for i in range(n)]
     offsets = []
     acc = 0.0
@@ -330,7 +505,6 @@ def encode_video(frames: list[tuple[str, float]], trans: float, out_path: str) -
                 "-i",
                 png,
             ]
-        # Silent stereo AAC so X/Buffer accept the file as a proper video.
         cmd += [
             "-f",
             "lavfi",
@@ -342,16 +516,14 @@ def encode_video(frames: list[tuple[str, float]], trans: float, out_path: str) -
 
         parts: list[str] = []
         for i in range(n):
-            # Do not use settb/setpts here: they make xfade see fps 1/0.
             parts.append(
                 f"[{i}:v]scale={WIDTH}:{HEIGHT}:flags=lanczos,"
                 f"fps={FPS},format=yuv420p,setsar=1[v{i}]"
             )
-        # Intro -> first item: fade; between items: slideleft; last -> outro: fade.
         last = "v0"
         for i in range(n - 1):
-            # i==0 is intro->item1 (fade); i==n-2 is last item->outro (fade);
-            # everything in between is an item-to-item slide.
+            # intro -> first screen and last screen -> outro fade;
+            # screen-to-screen uses a fast slide.
             if i == 0 or i == n - 2:
                 transition = "fade"
             else:
@@ -404,7 +576,6 @@ def encode_video(frames: list[tuple[str, float]], trans: float, out_path: str) -
         ]
         subprocess.run(cmd, check=True)
 
-    # Aim for high quality around 8 Mbps, shrink if the file would exceed 15MB.
     attempts = [
         ("8M", "16M", 18),
         ("6M", "12M", 20),
@@ -424,7 +595,6 @@ def encode_video(frames: list[tuple[str, float]], trans: float, out_path: str) -
             last_err = last_err or RuntimeError("ffmpeg produced an empty file")
     if last_err and (not os.path.isfile(out_path) or os.path.getsize(out_path) == 0):
         raise last_err
-    # Still over 15MB after the softest encode — leave the smallest file and warn.
     size = os.path.getsize(out_path)
     if size > MAX_BYTES:
         print(
@@ -435,18 +605,27 @@ def encode_video(frames: list[tuple[str, float]], trans: float, out_path: str) -
 
 def render_video(payload: dict, out_path: str, duration: float | None) -> str:
     items = payload["items"]
-    n = len(items)
-    intro_t, item_t, outro_t, trans = timings(n, duration)
+    chunks = chunk_items(items)
+    n_screens = len(chunks)
+    intro_t, screen_t, outro_t, trans = timings(n_screens, len(items), duration)
     tmp = tempfile.mkdtemp(prefix="vnews-")
     try:
         frames: list[tuple[str, float]] = []
         intro = os.path.join(tmp, "intro.png")
         render_intro(intro, payload["title"], payload["datetime"])
         frames.append((intro, intro_t))
-        for i, it in enumerate(items, 1):
-            p = os.path.join(tmp, f"item-{i:02d}.png")
-            render_item(p, payload["title"], payload["datetime"], i, n, it["place"], it["text"])
-            frames.append((p, item_t))
+        for si, chunk in enumerate(chunks):
+            p = os.path.join(tmp, f"screen-{si+1:02d}.png")
+            if len(chunk) == 1:
+                index, item = chunk[0]
+                render_hero_item(
+                    p, payload["title"], payload["datetime"], index, item, si, n_screens
+                )
+            else:
+                render_pair(
+                    p, payload["title"], payload["datetime"], chunk, si, n_screens
+                )
+            frames.append((p, screen_t))
         outro = os.path.join(tmp, "outro.png")
         render_outro(outro)
         frames.append((outro, outro_t))
@@ -464,7 +643,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--duration",
         type=float,
         default=None,
-        help="Target total duration in seconds (default: ~14 for 5 items, ~14.5 for 10)",
+        help="Target total duration in seconds (default: ~14 for 5 items, ~15 for 10)",
     )
     return p.parse_args(argv)
 
