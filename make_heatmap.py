@@ -9,7 +9,7 @@ Usage:
 The first half of the duration (capped at 4s) counts every percentage up
 from 0.00 and animates tile fills from burgundy toward red (losses) or
 green (gains). The rest of the clip holds the final frame. Output is a
-silent 1080x1920 H.264 30fps MP4 with faststart.
+1080x1920 H.264 High yuv420p 30fps MP4 with faststart and a silent AAC track (Buffer/X friendly).
 """
 
 from __future__ import annotations
@@ -781,7 +781,8 @@ def main() -> int:
             if i >= animate_frames:
                 progress = 1.0
             else:
-                progress = i / max(1, animate_frames - 1)
+                t = i / max(1, animate_frames - 1)
+                progress = 1.0 - (1.0 - t) ** 2.2  # ease-out: fast start, smooth settle
             raw = render_frame(plans, progress, title, date_range)
             yield downscale_frame(raw)
 
