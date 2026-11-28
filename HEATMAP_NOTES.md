@@ -8,3 +8,5 @@
    - If it exits non-zero: do NOT post an image fallback silently; retry once, otherwise tell the user.
 4. Buffer create_post: mode shareNow, text hook + hashtags, assets=[{video:{url:VIDEO_URL}}]. If Buffer errors, report it.
 Root cause 28 Nov 2026: commit 57fd13a held a truncated MP4 (1,572,912 B, no moov atom; real file 1,685,739 B) -> jsDelivr served HTTP 200 but Buffer could not read it.
+
+Footer: official Aboq India mark (assets/aboq-mark.png, from aboqindia.com/brand/mark.png) plus 'Aboqindia.com' on an ivory badge, right of @NBSHARMA3. Do not invent or replace this mark.

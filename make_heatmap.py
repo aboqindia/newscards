@@ -33,10 +33,10 @@ from cardutil import (
     ORANGE,
     WHITE,
     WIDTH,
-    draw_footer,
     draw_pill,
     draw_text,
     load_font,
+    make_x_icon,
     measure_pill,
     new_canvas,
     text_height,
@@ -77,6 +77,114 @@ SILVER_TEXT = (40, 44, 48)
 BTC_FILL = (247, 147, 26)  # bitcoin orange
 BTC_RIM = (255, 190, 80)
 BTC_TEXT = (255, 255, 255)
+
+# Official Aboq India mark (transparent gold triangle from aboqindia.com/brand/mark.png).
+ABOQ_MARK_PATH = os.path.join(REPO_DIR, "assets", "aboq-mark.png")
+ABOQ_CREDIT = "Aboqindia.com"
+ABOQ_BADGE_BG = (255, 247, 228)     # warm ivory, contrast on the black footer
+ABOQ_BADGE_FG = (16, 24, 38)        # deep navy, phone-readable
+ABOQ_BADGE_EDGE = (196, 148, 42)    # gold rim
+
+# Footer metrics (unscaled). Badge sits to the right of @NBSHARMA3.
+FOOTER_PAD_X = 48
+FOOTER_HANDLE_SIZE = 26
+FOOTER_ICON_SIZE = 26
+FOOTER_BOTTOM_PAD = 30
+FOOTER_RULE_GAP = 20
+FOOTER_MARK_H = 52
+FOOTER_CREDIT_SIZE = 30
+FOOTER_BADGE_PAD_X = 14
+FOOTER_BADGE_PAD_Y = 9
+FOOTER_BADGE_GAP = 10
+FOOTER_BADGE_RADIUS = 10
+
+_aboq_mark_cache: dict[int, Image.Image] = {}
+
+
+def load_aboq_mark(height: int) -> Image.Image:
+    """Official mark, LANCZOS-scaled to the working canvas (SCALE=2 keeps it sharp)."""
+    h = max(1, int(height))
+    cached = _aboq_mark_cache.get(h)
+    if cached is not None:
+        return cached
+    if not os.path.isfile(ABOQ_MARK_PATH):
+        raise FileNotFoundError(f"Missing official Aboq India mark: {ABOQ_MARK_PATH}")
+    src = Image.open(ABOQ_MARK_PATH).convert("RGBA")
+    new_w = max(1, round(src.width * h / src.height))
+    out = src.resize((new_w, h), Image.Resampling.LANCZOS)
+    _aboq_mark_cache[h] = out
+    return out
+
+
+def footer_band_h(s: int) -> int:
+    return FOOTER_MARK_H * s + 2 * FOOTER_BADGE_PAD_Y * s
+
+
+def make_aboq_badge(s: int) -> Image.Image:
+    """Ivory badge: official mark + Aboqindia.com, sized for a phone screen."""
+    mark = load_aboq_mark(FOOTER_MARK_H * s)
+    font = load_font(FOOTER_CREDIT_SIZE * s, 800)
+    text_w = text_width(font, ABOQ_CREDIT)
+    text_h = text_height(font, ABOQ_CREDIT)
+    pad_x = FOOTER_BADGE_PAD_X * s
+    pad_y = FOOTER_BADGE_PAD_Y * s
+    gap = FOOTER_BADGE_GAP * s
+    bw = int(round(pad_x + mark.width + gap + text_w + pad_x))
+    bh = int(round(max(mark.height, text_h) + pad_y * 2))
+    radius = int(FOOTER_BADGE_RADIUS * s)
+    badge = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
+    d = ImageDraw.Draw(badge)
+    d.rounded_rectangle((0, 0, bw - 1, bh - 1), radius=radius, fill=ABOQ_BADGE_BG + (255,))
+    ow = max(2, 2 * s)
+    inset = ow // 2
+    d.rounded_rectangle(
+        (inset, inset, bw - 1 - inset, bh - 1 - inset),
+        radius=max(1, radius - inset),
+        outline=ABOQ_BADGE_EDGE + (255,),
+        width=ow,
+    )
+    mark_x = pad_x
+    mark_y = (bh - mark.height) // 2
+    badge.paste(mark, (mark_x, mark_y), mark)
+    text_x = mark_x + mark.width + gap
+    text_y = (bh - text_h) / 2
+    draw_text(d, (text_x, text_y), ABOQ_CREDIT, font, ABOQ_BADGE_FG)
+    return badge
+
+
+def draw_heatmap_footer(img: Image.Image, draw: ImageDraw.ImageDraw, s: int) -> int:
+    """Orange rule, X handle on the left, Aboq badge on the right. Returns rule y."""
+    pad = FOOTER_PAD_X * s
+    band_h = footer_band_h(s)
+    footer_bottom = HEIGHT * s - FOOTER_BOTTOM_PAD * s
+    content_y = footer_bottom - band_h
+    rule_y = content_y - FOOTER_RULE_GAP * s
+    draw.rectangle((pad, rule_y, WIDTH * s - pad, rule_y + 3 * s), fill=ORANGE)
+
+    mid_y = content_y + band_h / 2
+    icon_px = FOOTER_ICON_SIZE * s
+    icon = make_x_icon(icon_px, WHITE)
+    img.paste(icon, (int(pad), int(round(mid_y - icon_px / 2))), icon)
+    handle_font = load_font(FOOTER_HANDLE_SIZE * s, 800)
+    handle_h = text_height(handle_font, HANDLE)
+    draw_text(
+        draw,
+        (pad + icon_px + 12 * s, mid_y - handle_h / 2),
+        HANDLE,
+        handle_font,
+        WHITE,
+    )
+
+    badge = make_aboq_badge(s)
+    bx = WIDTH * s - pad - badge.width
+    by = int(round(mid_y - badge.height / 2))
+    # Leave a clear gap so the badge never runs into the handle.
+    handle_right = pad + icon_px + 12 * s + text_width(handle_font, HANDLE)
+    if bx < handle_right + 16 * s:
+        raise RuntimeError("Aboq footer badge overlaps the handle; shrink the credit")
+    img.paste(badge, (int(bx), int(by)), badge)
+    return rule_y
+
 
 TINY_CODES = {"GOLD": "AU", "SILVER": "AG", "BTC": "BTC"}
 
@@ -525,15 +633,10 @@ def chrome_bounds(s: int) -> tuple[int, int, int, int, int]:
     title_h = text_height(title_font, "GLOBAL MARKETS THIS WEEK")
     below = 18 * s
     header_bottom = bar_h + top_gap + title_h + below
-    # Footer matches cardutil.draw_footer with slim paddings.
-    handle_size = 26 * s
-    icon_size = 26 * s
-    bottom_pad = 40 * s
-    handle_font = load_font(handle_size, 800)
-    footer_content_h = max(icon_size, text_height(handle_font, HANDLE))
-    footer_bottom = HEIGHT * s - bottom_pad
-    content_y = footer_bottom - footer_content_h
-    rule_y = content_y - 16 * s
+    # Footer: handle on the left, Aboq badge on the right, below the treemap.
+    footer_bottom = HEIGHT * s - FOOTER_BOTTOM_PAD * s
+    content_y = footer_bottom - footer_band_h(s)
+    rule_y = content_y - FOOTER_RULE_GAP * s
     treemap_y = header_bottom
     treemap_h = rule_y - 16 * s - treemap_y
     return pad, header_bottom, rule_y, treemap_y, treemap_h
@@ -595,15 +698,7 @@ def render_frame(
     # Dark stage behind the treemap gutters (cardutil canvas starts as BG).
     draw.rectangle((0, 0, WIDTH * s, HEIGHT * s), fill=GUTTER_BG)
     draw_header(draw, s, title, date_range)
-    draw_footer(
-        draw,
-        img,
-        s,
-        pad_x=48,
-        handle_size=26,
-        icon_size=26,
-        bottom_pad=40,
-    )
+    draw_heatmap_footer(img, draw, s)
 
     t = ease_out_quad(progress)
     for plan in plans:
