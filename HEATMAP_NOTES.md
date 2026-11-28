@@ -9,4 +9,4 @@
 4. Buffer create_post: mode shareNow, text hook + hashtags, assets=[{video:{url:VIDEO_URL}}]. If Buffer errors, report it.
 Root cause 28 Nov 2026: commit 57fd13a held a truncated MP4 (1,572,912 B, no moov atom; real file 1,685,739 B) -> jsDelivr served HTTP 200 but Buffer could not read it.
 
-Footer: official Aboq India mark (assets/aboq-mark.png, from aboqindia.com/brand/mark.png) plus 'Aboqindia.com' on an ivory badge, right of @NBSHARMA3. Do not invent or replace this mark.
+Branding: official circular Aboq India coin (assets/aboq-logo-round.png, cropped from the user-supplied gold-coin logo) sits as a top-left brand bug, 128px at 1080 wide, with a short fade-in and a soft drop shadow. The footer keeps @NBSHARMA3 and an ivory 'Aboqindia.com' text badge; do not invent or swap the coin logo.

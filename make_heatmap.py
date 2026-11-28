@@ -24,7 +24,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from cardutil import (
     BG,
@@ -78,59 +78,115 @@ BTC_FILL = (247, 147, 26)  # bitcoin orange
 BTC_RIM = (255, 190, 80)
 BTC_TEXT = (255, 255, 255)
 
-# Official Aboq India mark (transparent gold triangle from aboqindia.com/brand/mark.png).
-ABOQ_MARK_PATH = os.path.join(REPO_DIR, "assets", "aboq-mark.png")
+# Official Aboq India coin logo (user-supplied, cropped to a transparent circle).
+ABOQ_LOGO_PATH = os.path.join(REPO_DIR, "assets", "aboq-logo-round.png")
 ABOQ_CREDIT = "Aboqindia.com"
-ABOQ_BADGE_BG = (255, 247, 228)     # warm ivory, contrast on the black footer
-ABOQ_BADGE_FG = (16, 24, 38)        # deep navy, phone-readable
-ABOQ_BADGE_EDGE = (196, 148, 42)    # gold rim
+ABOQ_BADGE_BG = (255, 247, 228)
+ABOQ_BADGE_FG = (16, 24, 38)
+ABOQ_BADGE_EDGE = (196, 148, 42)
 
-# Footer metrics (unscaled). Badge sits to the right of @NBSHARMA3.
+# Broadcast-style brand bug in the top-left header (unscaled / 1080-wide px).
+LOGO_D = 128                 # diameter, visible on a phone, not a cover-up
+LOGO_MARGIN_L = 24           # safe margin from the left edge
+LOGO_GAP_UNDER_CAP = 12      # sits just below the orange cap
+LOGO_GAP_RIGHT = 18          # gap between logo and title
+LOGO_GAP_BELOW = 14          # clearance above the treemap
+LOGO_FADE_S = 0.3            # fade-in at the start of the clip
+ORANGE_CAP_H = 10
+
+# Footer metrics (unscaled). Text badge sits to the right of @NBSHARMA3.
 FOOTER_PAD_X = 48
 FOOTER_HANDLE_SIZE = 26
 FOOTER_ICON_SIZE = 26
 FOOTER_BOTTOM_PAD = 30
 FOOTER_RULE_GAP = 20
-FOOTER_MARK_H = 52
-FOOTER_CREDIT_SIZE = 30
-FOOTER_BADGE_PAD_X = 14
+FOOTER_CREDIT_SIZE = 28
+FOOTER_BADGE_PAD_X = 16
 FOOTER_BADGE_PAD_Y = 9
-FOOTER_BADGE_GAP = 10
 FOOTER_BADGE_RADIUS = 10
 
-_aboq_mark_cache: dict[int, Image.Image] = {}
+_aboq_logo_cache: dict[int, Image.Image] = {}
 
 
-def load_aboq_mark(height: int) -> Image.Image:
-    """Official mark, LANCZOS-scaled to the working canvas (SCALE=2 keeps it sharp)."""
-    h = max(1, int(height))
-    cached = _aboq_mark_cache.get(h)
+def load_aboq_logo(diameter: int) -> Image.Image:
+    """Official circular coin, LANCZOS-scaled to the working canvas."""
+    d = max(1, int(diameter))
+    cached = _aboq_logo_cache.get(d)
     if cached is not None:
         return cached
-    if not os.path.isfile(ABOQ_MARK_PATH):
-        raise FileNotFoundError(f"Missing official Aboq India mark: {ABOQ_MARK_PATH}")
-    src = Image.open(ABOQ_MARK_PATH).convert("RGBA")
-    new_w = max(1, round(src.width * h / src.height))
-    out = src.resize((new_w, h), Image.Resampling.LANCZOS)
-    _aboq_mark_cache[h] = out
+    if not os.path.isfile(ABOQ_LOGO_PATH):
+        raise FileNotFoundError(f"Missing official Aboq India logo: {ABOQ_LOGO_PATH}")
+    src = Image.open(ABOQ_LOGO_PATH).convert("RGBA")
+    out = src.resize((d, d), Image.Resampling.LANCZOS)
+    _aboq_logo_cache[d] = out
     return out
 
 
+def logo_fade_alpha(t_sec: float) -> float:
+    """Smoothstep fade-in over the first LOGO_FADE_S seconds, then hold."""
+    if t_sec <= 0:
+        return 0.0
+    if t_sec >= LOGO_FADE_S:
+        return 1.0
+    u = t_sec / LOGO_FADE_S
+    return u * u * (3.0 - 2.0 * u)
+
+
+def logo_rect(s: int) -> tuple[int, int, int]:
+    """Return (x, y, diameter) of the brand bug in scale space."""
+    d = LOGO_D * s
+    x = LOGO_MARGIN_L * s
+    y = ORANGE_CAP_H * s + LOGO_GAP_UNDER_CAP * s
+    return x, y, d
+
+
+def paste_brand_bug(img: Image.Image, s: int, alpha: float) -> None:
+    """Top-left circular logo with a soft drop shadow. Alpha 0–1 for the fade."""
+    if alpha <= 0.001:
+        return
+    x, y, d = logo_rect(s)
+    logo = load_aboq_logo(d)
+    if alpha < 0.999:
+        logo = logo.copy()
+        logo.putalpha(logo.split()[-1].point(lambda p, a=alpha: int(round(p * a))))
+
+    sh_x, sh_y = 3 * s, 4 * s
+    blur = max(1.0, 2.5 * s)
+    pad = int(round(blur * 3)) + max(sh_x, sh_y)
+    lw, lh = d + pad * 2 + sh_x, d + pad * 2 + sh_y
+    layer = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", (d, d), (0, 0, 0, 0))
+    shadow.paste(Image.new("RGBA", (d, d), (0, 0, 0, int(150 * alpha))), (0, 0), logo.split()[-1])
+    layer.paste(shadow, (pad + sh_x, pad + sh_y), shadow)
+    layer = layer.filter(ImageFilter.GaussianBlur(radius=blur))
+    layer.paste(logo, (pad, pad), logo)
+
+    dest_x, dest_y = int(x - pad), int(y - pad)
+    # Clip to the canvas and composite only the local patch (keeps RGB canvas fast).
+    cx0, cy0 = max(0, dest_x), max(0, dest_y)
+    cx1, cy1 = min(img.width, dest_x + lw), min(img.height, dest_y + lh)
+    if cx1 <= cx0 or cy1 <= cy0:
+        return
+    sx0, sy0 = cx0 - dest_x, cy0 - dest_y
+    patch = img.crop((cx0, cy0, cx1, cy1)).convert("RGBA")
+    piece = layer.crop((sx0, sy0, sx0 + (cx1 - cx0), sy0 + (cy1 - cy0)))
+    img.paste(Image.alpha_composite(patch, piece).convert("RGB"), (cx0, cy0))
+
+
 def footer_band_h(s: int) -> int:
-    return FOOTER_MARK_H * s + 2 * FOOTER_BADGE_PAD_Y * s
+    font = load_font(FOOTER_CREDIT_SIZE * s, 800)
+    return int(round(text_height(font, ABOQ_CREDIT) + 2 * FOOTER_BADGE_PAD_Y * s))
 
 
 def make_aboq_badge(s: int) -> Image.Image:
-    """Ivory badge: official mark + Aboqindia.com, sized for a phone screen."""
-    mark = load_aboq_mark(FOOTER_MARK_H * s)
+    """Ivory text badge: Aboqindia.com, sized for a phone screen."""
     font = load_font(FOOTER_CREDIT_SIZE * s, 800)
     text_w = text_width(font, ABOQ_CREDIT)
     text_h = text_height(font, ABOQ_CREDIT)
     pad_x = FOOTER_BADGE_PAD_X * s
     pad_y = FOOTER_BADGE_PAD_Y * s
-    gap = FOOTER_BADGE_GAP * s
-    bw = int(round(pad_x + mark.width + gap + text_w + pad_x))
-    bh = int(round(max(mark.height, text_h) + pad_y * 2))
+    bw = int(round(text_w + pad_x * 2))
+    bh = int(round(text_h + pad_y * 2))
     radius = int(FOOTER_BADGE_RADIUS * s)
     badge = Image.new("RGBA", (bw, bh), (0, 0, 0, 0))
     d = ImageDraw.Draw(badge)
@@ -143,17 +199,12 @@ def make_aboq_badge(s: int) -> Image.Image:
         outline=ABOQ_BADGE_EDGE + (255,),
         width=ow,
     )
-    mark_x = pad_x
-    mark_y = (bh - mark.height) // 2
-    badge.paste(mark, (mark_x, mark_y), mark)
-    text_x = mark_x + mark.width + gap
-    text_y = (bh - text_h) / 2
-    draw_text(d, (text_x, text_y), ABOQ_CREDIT, font, ABOQ_BADGE_FG)
+    draw_text(d, (pad_x, (bh - text_h) / 2), ABOQ_CREDIT, font, ABOQ_BADGE_FG)
     return badge
 
 
 def draw_heatmap_footer(img: Image.Image, draw: ImageDraw.ImageDraw, s: int) -> int:
-    """Orange rule, X handle on the left, Aboq badge on the right. Returns rule y."""
+    """Orange rule, X handle on the left, Aboqindia.com badge on the right. Returns rule y."""
     pad = FOOTER_PAD_X * s
     band_h = footer_band_h(s)
     footer_bottom = HEIGHT * s - FOOTER_BOTTOM_PAD * s
@@ -178,7 +229,6 @@ def draw_heatmap_footer(img: Image.Image, draw: ImageDraw.ImageDraw, s: int) -> 
     badge = make_aboq_badge(s)
     bx = WIDTH * s - pad - badge.width
     by = int(round(mid_y - badge.height / 2))
-    # Leave a clear gap so the badge never runs into the handle.
     handle_right = pad + icon_px + 12 * s + text_width(handle_font, HANDLE)
     if bx < handle_right + 16 * s:
         raise RuntimeError("Aboq footer badge overlaps the handle; shrink the credit")
@@ -626,13 +676,8 @@ def draw_pct(draw: ImageDraw.ImageDraw, plan: dict, current: float, fill=TEXT) -
 def chrome_bounds(s: int) -> tuple[int, int, int, int, int]:
     """Return (pad, header_bottom, footer_rule_y, treemap_y, treemap_h) in scale space."""
     pad = 48 * s
-    bar_h = 10 * s
-    top_gap = 22 * s
-    title_size = 36 * s
-    title_font = load_font(title_size, 800)
-    title_h = text_height(title_font, "GLOBAL MARKETS THIS WEEK")
-    below = 18 * s
-    header_bottom = bar_h + top_gap + title_h + below
+    _lx, ly, ld = logo_rect(s)
+    header_bottom = ly + ld + LOGO_GAP_BELOW * s
     # Footer: handle on the left, Aboq badge on the right, below the treemap.
     footer_bottom = HEIGHT * s - FOOTER_BOTTOM_PAD * s
     content_y = footer_bottom - footer_band_h(s)
@@ -642,38 +687,43 @@ def chrome_bounds(s: int) -> tuple[int, int, int, int, int]:
     return pad, header_bottom, rule_y, treemap_y, treemap_h
 
 
-def draw_header(draw: ImageDraw.ImageDraw, s: int, title: str, date_range: str) -> None:
-    W, H = WIDTH * s, HEIGHT * s
+def draw_header(
+    img: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    s: int,
+    title: str,
+    date_range: str,
+    logo_alpha: float = 1.0,
+) -> None:
+    W = WIDTH * s
     # Slim orange cap, same language as the news cards.
-    draw.rectangle((0, 0, W, 10 * s), fill=ORANGE)
+    draw.rectangle((0, 0, W, ORANGE_CAP_H * s), fill=ORANGE)
 
-    pad = 48 * s
+    lx, ly, ld = logo_rect(s)
+    paste_brand_bug(img, s, logo_alpha)
+
+    # Title and date sit to the right of the logo, vertically centred on it.
+    pad_r = 48 * s
     title_font = load_font(36 * s, 800)
     title = title.upper()
     title_h = text_height(title_font, title)
-    title_y = 10 * s + 22 * s
+    mid_y = ly + ld / 2
+    title_x = lx + ld + LOGO_GAP_RIGHT * s
 
-    # Short orange accent bar, optically centred on the cap-height.
-    bar_w, bar_h = 28 * s, 6 * s
-    bar_y = title_y + max(0, (title_h - bar_h) // 2) + 1 * s
-    draw.rectangle((pad, bar_y, pad + bar_w, bar_y + bar_h), fill=ORANGE)
-
-    title_x = pad + bar_w + 14 * s
-    # Leave room for the date pill on the right.
     pill_font = load_font(20 * s, 700)
     pill_pad_x, pill_pad_y = 14 * s, 7 * s
     pill_w, pill_h = measure_pill(date_range, pill_font, pill_pad_x, pill_pad_y)
-    max_title_w = W - pad - pill_w - 24 * s - title_x
-    # Shrink the title if the week label needs the space.
+    max_title_w = W - pad_r - pill_w - 24 * s - title_x
     size = 36 * s
     while size > 22 * s and text_width(title_font, title) > max_title_w:
         size -= 2
         title_font = load_font(size, 800)
         title_h = text_height(title_font, title)
+    title_y = mid_y - title_h / 2
     draw_text(draw, (title_x, title_y), title, title_font, WHITE)
 
-    pill_x = W - pad - pill_w
-    pill_y = title_y + max(0, (title_h - pill_h) // 2)
+    pill_x = W - pad_r - pill_w
+    pill_y = mid_y - pill_h / 2
     draw_pill(
         draw,
         (pill_x, pill_y),
@@ -693,11 +743,12 @@ def render_frame(
     progress: float,
     title: str,
     date_range: str,
+    t_sec: float = 8.0,
 ) -> Image.Image:
     img, draw, s = new_canvas()
     # Dark stage behind the treemap gutters (cardutil canvas starts as BG).
     draw.rectangle((0, 0, WIDTH * s, HEIGHT * s), fill=GUTTER_BG)
-    draw_header(draw, s, title, date_range)
+    draw_header(img, draw, s, title, date_range, logo_alpha=logo_fade_alpha(t_sec))
     draw_heatmap_footer(img, draw, s)
 
     t = ease_out_quad(progress)
@@ -878,13 +929,13 @@ def main() -> int:
             else:
                 t = i / max(1, animate_frames - 1)
                 progress = 1.0 - (1.0 - t) ** 2.2  # ease-out: fast start, smooth settle
-            raw = render_frame(plans, progress, title, date_range)
+            raw = render_frame(plans, progress, title, date_range, t_sec=i / FPS)
             yield downscale_frame(raw)
 
     # Final-frame PNG first so a failed encode still leaves a still.
     if args.png is not None:
         png_path = args.png if isinstance(args.png, str) else os.path.splitext(args.out)[0] + ".png"
-        final = downscale_frame(render_frame(plans, 1.0, title, date_range))
+        final = downscale_frame(render_frame(plans, 1.0, title, date_range, t_sec=8.0))
         os.makedirs(os.path.dirname(os.path.abspath(png_path)) or ".", exist_ok=True)
         final.save(png_path, "PNG", optimize=True)
         print(f"Wrote {png_path}")
